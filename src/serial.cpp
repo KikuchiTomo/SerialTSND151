@@ -1,14 +1,6 @@
-//
-// serial.cpp
-// シリアル通信周りをまとめたクラス
-//
-// Created by KikuchiTomoo on 2022/08/25 (Auto added by Emacs 27.1)
-//
-
 #include "serial.hpp"
 
-/* private functions */
-speed_t SerialUSB::__dec2baudrate(int baud_rate){
+speed_t SerialTSND151::Serial::baudrate(int baud_rate){
   switch(baud_rate){
   case    9600: return    B9600; break;
   case   19200: return   B19200; break;
@@ -17,63 +9,92 @@ speed_t SerialUSB::__dec2baudrate(int baud_rate){
   case  115200: return  B115200; break;
   case  230400: return  B230400; break;
   default:
+    std::cerr << "fail to convert baud rate. bye." << std::endl;
     exit(-1);
     break;
-  }
+  }  
 }
 
-/* public functions */
+SerialTSND151::Serial::Serial(long long int bufferSize){
+  
+  rb_ = new SerialTSND151::RingDeque<char>(bufferSize, 0);
+  sb_ = new SerialTSND151::RingDeque<char>(bufferSize, 0);
 
-SerialUSB::SerialUSB(int buffer_size){  
-  rb_ = new RingDeque<char>((long long int)buffer_size);
-  sb_ = new RingDeque<char>((long long int)buffer_size);
+  tmp_rb_ = (char*) calloc(sizeof(char), bufferSize);
+  tmp_sb_ = (char*) calloc(sizeof(char), bufferSize);
+
+  port_name_ = (char*) malloc(sizeof(char) * 512);
 }
 
-SerialUSB::~SerialUSB(){
+void SerialTSND151::Serial::error(const char* format, ...){
+  fprintf(stderr, "[ERROR] %s : \x1b[31m", "Serial");
+  
+  va_list va;
+  va_start(va, format);
+  vprintf(format, va);
+  va_end(va);
+  
+  fprintf(stderr, "\x1b[39m");
+}
+
+void SerialTSND151::Serial::info(const char* format, ...){
+  printf("[INFO] %s : \x1b[32m", "Serial");
+  
+  va_list va;
+  va_start(va, format);
+  vprintf(format, va);
+  va_end(va);
+  
+  printf("\x1b[39m");
+}
+
+SerialTSND151::Serial::~Serial(){
   delete rb_;
   delete sb_;
+
+  free(tmp_rb_);
+  free(tmp_sb_);  
 }
 
-
-void SerialUSB::set_port(const char *port_name){
-  strcpy(port_name_, port_name);
+void SerialTSND151::Serial::setPort(const char* port_name){
+  strcpy(port_name_, port_name);  
 }
 
-void SerialUSB::begin(int baud_rate, unsigned char config){
+void SerialTSND151::Serial::setTimeout(long long int sec, long long int usec){
+  timeout_s_ = sec;
+  timeout_us_ = usec;
+}
+
+bool SerialTSND151::Serial::begin(int baud_rate, unsigned char config){
+  // Open
   fd_ = open(port_name_, O_RDWR|O_NONBLOCK);
-  struct termios tio;     
+  struct termios tio;
 
   if (fd_ < 0) {
-#ifdef DEBUG_OUT
-    fprintf(stderr, "[ERR] SerialUSB : \x1b[31m Cannot open device (%s) \x1b[39m\n", port_name_);
-#endif
-    exit(-1);
+    error("Cannot open device (%s)\n", port_name_);
+    return false;
   }
-  
+
   if(tcgetattr(fd_, &tio) < 0) {
-#ifdef DEBUG_OUT
-    fprintf(stderr, "[ERR] SerialUSB : \x1b[31m Cannot get terminal attributes \x1b[39m\n");
-#endif
-    return ;
+    error("Cannot get terminal attributes\n");
+    return false;
   }
 
-  cfsetspeed(&tio, __dec2baudrate(baud_rate));
+  cfsetspeed(&tio, baudrate(baud_rate));
 
-
+  // Set flags
   tio.c_cflag &= ~CSIZE;
-  if(     config & SERIAL_CS5) tio.c_cflag |= CS5;
-  else if(config & SERIAL_CS6) tio.c_cflag |= CS6;
-  else if(config & SERIAL_CS7) tio.c_cflag |= CS7;
-  else                         tio.c_cflag |= CS8;
+  if(     config & __SERIAL_TSND151_SERIAL_CS5) tio.c_cflag |= CS5;
+  else if(config & __SERIAL_TSND151_SERIAL_CS6) tio.c_cflag |= CS6;
+  else if(config & __SERIAL_TSND151_SERIAL_CS7) tio.c_cflag |= CS7;
+  else                                          tio.c_cflag |= CS8;
 
+  if(     config & __SERIAL_TSND151_SERIAL_PARN) { tio.c_cflag &= ~PARENB; }
+  else if(config & __SERIAL_TSND151_SERIAL_PARO) { tio.c_cflag |=  PARENB; tio.c_cflag |=  PARODD;}
+  else                                           { tio.c_cflag |=  PARENB; tio.c_cflag &= ~PARODD;}
 
-  if(     config & SERIAL_PARN) { tio.c_cflag &= ~PARENB; }
-  else if(config & SERIAL_PARO) { tio.c_cflag |=  PARENB; tio.c_cflag |=  PARODD;}
-  else                          { tio.c_cflag |=  PARENB; tio.c_cflag &= ~PARODD;}
-
-  if(     config & SERIAL_STOPB1) tio.c_cflag &= ~CSTOPB;
-  else                            tio.c_cflag |=  CSTOPB;
-
+  if(     config & __SERIAL_TSND151_SERIAL_STP1) tio.c_cflag &= ~CSTOPB;
+  else                                           tio.c_cflag |=  CSTOPB;
   
   tio.c_cflag &= ~CRTSCTS;
   tio.c_cflag |= CREAD | CLOCAL; 
@@ -84,118 +105,111 @@ void SerialUSB::begin(int baud_rate, unsigned char config){
   tio.c_cc[VMIN] = 0;
   tio.c_cc[VTIME] = 0;
 
-  
   tcsetattr( fd_, TCSANOW, &tio );
   
-  if( tcsetattr(fd_, TCSAFLUSH, &tio) < 0) {
-#ifdef DEBUG_OUT
-    fprintf(stderr, "[ERR] SerialUSB : \x1b[31m Cannot set terminal attributes \x1b[39m\n");
-#endif
-    return ;
+  if(tcsetattr(fd_, TCSAFLUSH, &tio) < 0) {
+    error("Cannot get terminal attributes\n");
+    return false;
+  }
+
+  info("Opened serial port. %s", port_name_);
+  return true;
+}
+
+void SerialTSND151::Serial::end(){
+  close(fd_);
+}
+
+unsigned char SerialTSND151::Serial::popRecvData(){
+  return rb_->popl();  
+}
+
+unsigned char SerialTSND151::Serial::readRecvData(int offset){
+  return rb_->readl(offset);
+}
+
+int SerialTSND151::Serial::getRecvSize(){
+  return rb_->getBufferLength();
+}
+
+int SerialTSND151::Serial::getSendSize(){
+  return sb_->getBufferLength();
+}
+
+void SerialTSND151::Serial::setSendData(unsigned char* data, int len){
+  if(!sm_.try_lock()){ return; }
+  for(int i=0; i<len; i++){
+    rb_->push(data[i]);
+  }
+  sm_.unlock();
+}
+
+void SerialTSND151::Serial::setSendData(unsigned char data){
+  if(!sm_.try_lock()){ return; }  
+  rb_->push(data);
+  sm_.unlock();
+}
+
+void SerialTSND151::Serial::clearSendBuffer(){
+  if(!sm_.try_lock()){ return; }
+  sb_->resetIndexes();
+  sm_.unlock();
+}
+
+void SerialTSND151::Serial::clearRecvBuffer(){
+  if(!rm_.try_lock()){ return; }  
+  rb_->resetIndexes();
+  rm_.unlock();
+}
+
+void SerialTSND151::Serial::recv(bool b){
+  // ブロックするか否か
+  if(b){ rm_.lock(); }
+  else {
+    bool is_lock = rm_.try_lock();
+    if(!is_lock) return;
   }
   
-  sleep(1);
-
-#ifdef DEBUG_OUT  
-  fprintf(stderr, "[INF] SerialUSB : \x1b[32m Opened serial port. \x1b[0m(\x1b[1m%s\x1b[0m) \x1b[39m\n", port_name_);
-#endif
-}
-
-unsigned char SerialUSB::pop_recv_data(){
-  return rb_->pop_left();
-}
-
-unsigned char SerialUSB::read_recv_data(int offset){
-  return rb_->read_left(offset);
-}
-
-int SerialUSB::get_recv_size(){
-  return rb_->get_length();
-}
-
-void SerialUSB::push_send_data(unsigned char data){
-  sb_->push(data);
-}
-
-void SerialUSB::set_timeout(long long sec, long long usec){
-  wait_time_sec_ = sec;
-  wait_time_u_   = usec;
-}
-
-void SerialUSB::reset_recv_buf(){
-  rb_->reset();
-}
-
-void SerialUSB::reset_send_buf(){
-  sb_->reset();
-}
-
-void SerialUSB::receive(bool is_brocking){
-  if(is_brocking)
-    pthread_mutex_lock(&m_); // lock (brocking)
-  else
-    pthread_mutex_trylock(&m_); // lock (non brocking)
-    
   FD_ZERO(&set_);
   FD_SET(fd_, &set_);
 
-  rv_ = select(fd_+1, &set_, NULL, NULL, &timeout_);
-  timeout_.tv_sec  = wait_time_sec_;
-  timeout_.tv_usec = wait_time_u_;
+  timeout_.tv_sec  = timeout_s_;
+  timeout_.tv_usec = timeout_us_;
 
+  // 受信バッファに何もないなら抜ける
+  rv_ = select(fd_+1, &set_, NULL, NULL, &timeout_); 
   if(rv_ <= 0){
-    usleep(10);
+    rm_.unlock();
     return;
   }
 
-  int ret = read(fd_, tmp_rb_, 512);
-  
+  // 受信
+  int ret = read(fd_, tmp_rb_, __SERIAL_TSND151_DEFAULT_BUFFER_SIZE);
   if(ret < 0){
-#ifdef DEBUG_OUT
-    fprintf(stderr, "[ERR] SerialUSB : \x1b[31m No data received. \x1b[39m\n");
-#endif
+    error("No data received.\n");
+    rm_.unlock();    
     return;
-  }else{
-#ifdef DEBUG_OUT_ON_RECV
-      fprintf(stdout, "[INF] SerialUSB : \x1b[32m Received data byte size \x1b[0m(\x1b[1m%d\x1b[0m) \x1b[39m\n", ret);
-#endif
   }
 
-  for(int i=0; i<ret; i++){
-    // printf("%02X ", tmp_rb_[i] & 0x000000FF);
-    rb_->push(tmp_rb_[i]);
-  }
-
-  //printf("\n");
-        
-  fflush(stdout);
-
-  pthread_mutex_unlock(&m_); // unlock
-  return;
+  // debug print
+  // fflush(stdout);
+  
+  rm_.unlock();
 }
 
+void SerialTSND151::Serial::send(bool b){
+  if(b){ sm_.lock(); }
+  else{
+    bool is_lock = sm_.try_lock();
+    if(!is_lock) return;
+  }
 
-void SerialUSB::send(bool is_brocking){  
-  if(is_brocking)
-    pthread_mutex_lock(&m_); // lock (brocking)
-  else
-    pthread_mutex_trylock(&m_); // lock (non brocking)
-  
   tcflush(fd_, TCIOFLUSH);
-
-  long long int send_len = sb_->get_length();
-
+  long long int send_len = sb_->getBufferLength();
   for(int i=0; i<send_len; i++){
-    tmp_sb_[i] = sb_->pop_left();
+    tmp_sb_[i] = sb_->popl();    
   }
 
   write(fd_, tmp_sb_, send_len);
-  pthread_mutex_unlock(&m_); // unlock
-}
-
-void SerialUSB::end(){
-  close(fd_);
-#ifdef DEBUG_OUT
-  fprintf(stderr, "[INF] SerialUSB : \x1b[32m Closed serial port. (\x1b[1m%s\x1b[0m) \x1b[39m\n", port_name_);
-#endif
+  sm_.unlock();
 }

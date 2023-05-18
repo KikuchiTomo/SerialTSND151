@@ -39,3 +39,9 @@
 
 # User
 *.bak
+bak
+bin
+obj
+
+# VS Code
+*.code-workspace
