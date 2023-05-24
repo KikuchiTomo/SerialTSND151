@@ -5,52 +5,69 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "serial.hpp"
 #include "packet.hpp"
+#include "serial.hpp"
+#include "types.hpp"
 
-namespace SerialTSND151{
-  class TSND151{
+#define __SERIAL_TSND151_DEFAULT_BUFFER_SIZE (4096)
+namespace SerialTSND151 {
+
+class TSND151 {
+  public:
+    typedef enum {
+        R_W_HEAD,
+        R_W_CMD,
+        R_W_PARAM,
+        R_W_BCC,
+    } R_Status;
+
+    typedef enum {
+        S_WAIT,
+        S_SEND,
+    } S_Status;
+
   private:
     Serial *device_;
-    
+
     std::mutex m_;
-    
-    void loop();
-        
+
+    Packet::receive_t rv_cmd_;
+    uint8_t *rv_buffer_;
+    uint16_t rv_index_;
+
+    uint8_t *sd_buffer_;
+    uint16_t sd_index_;
+
+    RingDeque<Event_t> *rv_datas_;
+
+    R_Status r_status_ = R_W_HEAD;
+    S_Status s_status_ = S_WAIT;
+
+    void _loop();
+
+    uint8_t _calc_bcc(const uint8_t *buf, int len);
+    bool _search_command(uint8_t byte, Packet::receive_t &cmd);
+    void _parse(Packet::receive_t cmd, const uint8_t *rv_buf, uint16_t rv_idx);
+    R_Status _recv_wait(uint8_t byte);
+    R_Status _recv_cmd(uint8_t byte, Packet::receive_t &rv_cmd,
+                       uint16_t &rv_idx);
+    R_Status _recv_param(uint8_t byte, Packet::receive_t rv_cmd,
+                         uint8_t *rv_buf, uint16_t &rv_idx);
+    R_Status _recv_bcc(uint8_t byte, const uint8_t *rv_buf, uint16_t rv_idx,
+                       bool &check);
+    void _copy_buf(uint8_t *dst, const uint8_t *src, int len, int offset);
+
   public:
-    void begin(const char* port_name);
+    TSND151(int rv_buf_size = 4096);
+    ~TSND151();
+
+    void popReceivedData();
+
+    void begin(const char *port_name, int baud_rate);
     void end();
 
     bool start();
-    bool stop();   
-    bool reserve(struct tm start_datetime, uint16_t start_msec, struct tm end_datetime, uint16_t end_msec);
-
-    bool getReservation(bool &enabled, struct tm &start_datetime, uint16_t &start_msec, struct tm &end_datetime, uint16_t &end_msec);        
-    bool getInformation(uint8_t& sn, uint8_t& ble_addr, uint8_t& version, uint8_t& product);    
-    bool setTime(struct tm datetime, unsigned int msec);
-    bool getTime(struct tm &datetime, unsigned int &msec);    
-    bool setGyroAccMeasuringSetting(uint8_t  measure_cycle, uint8_t  send_cycle, uint8_t  record_cycle);
-    bool getGyroAccMeasuringSetting(uint8_t &measure_cycle, uint8_t &send_cycle, uint8_t &record_cycle);
-    bool setGeoMeasuringSetting(uint8_t  measure_cycle, uint8_t  send_cycle, uint8_t  record_cycle);
-    bool getGeoMeasuringSetting(uint8_t &measure_cycle, uint8_t &send_cycle, uint8_t &record_cycle);
-    bool setAtmMeasuringSetting(uint8_t  measure_cycle, uint8_t  send_cycle, uint8_t  record_cycle);
-    bool getAtmMeasuringSetting(uint8_t &measure_cycle, uint8_t &send_cycle, uint8_t &record_cycle);
-    bool setBatteryVoltageMeasuringSetting(uint8_t  send_cycle, uint8_t  record_cycle);
-    bool getBatteryVoltageMeasuringSetting(uint8_t &send_cycle, uint8_t &record_cycle);
-    bool setExtendTerminalMeasuringEdgeSetting(uint8_t  measure_cycle, uint8_t  send_cycle, uint8_t  record_cycle, bool  send_ext_edge, bool  record_ext_edge);
-    bool getExtendTerminalMeasuringEdgeSetting(uint8_t &measure_cycle, uint8_t &send_cycle, uint8_t &record_cycle, bool &send_ext_edge, bool &record_ext_edge);
-    bool setExtendI2CSetting(uint8_t  measure_cycle, uint8_t  send_cycle, uint8_t  record_cycle);
-    bool getExtendI2CSetting(uint8_t &measure_cycle, uint8_t &send_cycle, uint8_t &record_cycle);
-    bool setAccRangeSetting(uint8_t  range);
-    bool getAccRangeSetting(uint8_t &range);
-    bool setAccCorrectSetting(uint8_t  mode_x, uint8_t  mode_y, uint8_t  mode_z, int32_t  x, int32_t  y, int32_t  z);
-    bool setGyroRangeSetting(uint8_t range);
-    bool getGyroRangeSetting(uint8_t &range);
-    
-    
-    
-  
-    
-  };
+    bool stop();
 };
+}; // namespace SerialTSND151
 #endif

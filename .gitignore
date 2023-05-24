@@ -45,3 +45,4 @@ obj
 
 # VS Code
 *.code-workspace
+.vscode
