@@ -30,3 +30,19 @@
 *.exe
 *.out
 *.app
+
+# Mac
+.DS_Store
+
+# Emacs
+~*
+
+# User
+*.bak
+bak
+bin
+obj
+
+# VS Code
+*.code-workspace
+.vscode
