@@ -3,33 +3,61 @@
 
 #define __SERIAL_TSND151_CODING
 #ifdef __SERIAL_TSND151_CODING
-#include "types.hpp"
+#include "../include/packet.hpp"
+#include "../include/tsnd151.hpp"
+#include "event_types.hpp"
+#include "response_types.hpp"
 #endif
 
 SerialTSND151::TSND151::TSND151(int rv_buf_size) {
     sd_buffer_ = (uint8_t *)calloc(sizeof(uint8_t), rv_buf_size);
+    sd_params_ = (uint8_t *)calloc(sizeof(uint8_t), rv_buf_size);
     rv_buffer_ = (uint8_t *)calloc(sizeof(uint8_t), rv_buf_size);
 
-    rv_datas_ = new RingDeque<Event_t>(__SERIAL_TSND151_DEFAULT_BUFFER_SIZE,
-                                       EventDefault);
+    ev_datas_ = new RingDeque<Event::Event_t>(
+        __SERIAL_TSND151_DEFAULT_BUFFER_SIZE, Event::Default);
+    rs_datas_ = new RingDeque<Response::Response_t>(
+        __SERIAL_TSND151_DEFAULT_BUFFER_SIZE, Response::Default);
+
+    isMeasuring_ = false;
+    willStop_ = false;
 }
 
 SerialTSND151::TSND151::~TSND151() {
     free(sd_buffer_);
+    free(sd_params_);
     free(rv_buffer_);
+
+    delete ev_datas_;
+    delete rs_datas_;
 }
 
-void SerialTSND151::TSND151::begin(const char *port_name, int baud_rate) {
+bool SerialTSND151::TSND151::begin(const char *port_name, int baud_rate) {
     device_ = new SerialTSND151::Serial(__SERIAL_TSND151_DEFAULT_BUFFER_SIZE);
     device_->setPort(port_name);
     device_->begin(baud_rate);
     sd_index_ = 0;
     rv_index_ = 0;
+
+    int ret = pthread_create(&thread_, NULL, TSND151::_thread_task, this);
+    if (ret != 0) {
+        return false;
+    }
+
+    return true;
 }
 
-void SerialTSND151::TSND151::end() {
+bool SerialTSND151::TSND151::end() {
+    willStop_ = true;
+    pthread_cancel(thread_);
+    int ret = pthread_join(thread_, NULL);
+    if (ret != 0) {
+        return false;
+    }
+
     device_->end();
     delete device_;
+    return true;
 }
 
 bool SerialTSND151::TSND151::start() { return true; }
@@ -116,53 +144,111 @@ void SerialTSND151::TSND151::_copy_buf(uint8_t *dst, const uint8_t *src,
     }
 }
 
+void SerialTSND151::TSND151::_create_sd_packet(uint8_t *buf, const uint8_t cmd,
+                                               const uint8_t *params,
+                                               int params_len) {
+    sd_m_.lock();
+
+    int len = 0;
+    sd_buffer_[len++] = Packet::PREFIX;
+    sd_buffer_[len++] = cmd;
+    for (int i = 0; i < params_len; i++) {
+        sd_buffer_[len++] = params[i];
+    }
+    sd_buffer_[len++] = _calc_bcc(sd_buffer_, len);
+    // for send thread
+    sd_index_ = len;
+
+    sd_m_.unlock();
+}
+
+SerialTSND151::Response::Response_t SerialTSND151::TSND151::get_info_b() {
+    // if (isMeasuring_)
+    //     return Response::Default;
+    rs_m_.lock();
+    // params
+    sd_params_[0] = 0x00;
+    // create
+    _create_sd_packet(sd_buffer_, Packet::Command::Get::TSND151_INFO.hex,
+                      sd_params_, 1);
+
+    printf("%d\n", sd_index_);
+    int rs_num0 = rs_datas_->getBufferLength();
+    int rs_num1 = rs_num0;
+    device_->setSendData(sd_buffer_, sd_index_);
+
+    while (rs_num0 == rs_num1) {
+        sleep(1);
+        printf("%d %d\n", rs_num0, rs_num1);
+        rs_num1 = rs_datas_->getBufferLength();
+    }
+
+    Response::Response_t res = rs_datas_->popl();
+    rs_m_.unlock();
+    return res;
+}
+
 void SerialTSND151::TSND151::_parse(Packet::receive_t cmd,
-                                    const uint8_t *rv_buf, uint16_t rv_idx) {
+                                    const uint8_t *rv_buf, uint16_t rv_idx,
+                                    bool check) {
     uint8_t h = cmd.hex;
+
+    Response::Response_t response = Response::Default;
+    response.Validation = check;
+
+    Event::Event_t event = Event::Default;
+    event.Validation = check;
 
     if (h == Packet::Response::CMD_RESPONSE_INFO.hex) {
         bool status = (rv_buf[0] == 1);
+        response.Type = Response::ResponseType::ResponseCommand;
+        response.Success = status;
+        rs_datas_->push(response);
     } else if (h == Packet::Response::TSND151_INFO.hex) {
-        uint8_t sn[10];
-        uint8_t addr[6];
-        uint8_t ver[4];
-        uint8_t type[10];
-        _copy_buf(sn, rv_buf, 10);
-        _copy_buf(addr, rv_buf, 6, 10);
-        _copy_buf(ver, rv_buf, 4, 16);
-        _copy_buf(type, rv_buf, 10, 20);
+        printf("Response: %02X\n", h);
+        response.Type = Response::ResponseType::ResponseGetInfo;
+        _copy_buf((unsigned char *)response.Info.SerialNumber, rv_buf, 10);
+        _copy_buf(response.Info.BluetoothAddress, rv_buf, 6, 10);
+        _copy_buf(response.Info.Version, rv_buf, 4, 16);
+        _copy_buf((unsigned char *)response.Info.Type, rv_buf, 10, 20);
+        rs_datas_->push(response);
     } else if (h == Packet::Response::TIME_INFO.hex) {
-        uint16_t year, mon, day, hour, min, sec, msec;
-        year = rv_buf[0] + 2000;
-        mon = rv_buf[1];
-        day = rv_buf[2];
-        hour = rv_buf[3];
-        min = rv_buf[4];
-        sec = rv_buf[5];
-        msec = (rv_buf[6] << 8) | (rv_buf[7]);
-    } else if (h == Packet::Response::MEASURING_SETTING_INFO.hex) {
-        bool enable_reserve = (rv_buf[0] == 1);
-        uint16_t s_year, s_mon, s_day, s_hour, s_min, s_sec;
-        uint16_t e_year, e_mon, e_day, e_hour, e_min, e_sec;
-
         int idx = 0;
-        s_year = rv_buf[idx++] + 2000;
-        s_mon = rv_buf[idx++];
-        s_day = rv_buf[idx++];
-        s_hour = rv_buf[idx++];
-        s_min = rv_buf[idx++];
-        s_sec = rv_buf[idx++];
-        e_year = rv_buf[idx++] + 2000;
-        e_mon = rv_buf[idx++];
-        e_day = rv_buf[idx++];
-        e_hour = rv_buf[idx++];
-        e_min = rv_buf[idx++];
-        e_sec = rv_buf[idx++];
+        response.Type = Response::ResponseType::ResponseGetTime;
+        response.Time.year = rv_buf[idx++] + 2000;
+        response.Time.mon = rv_buf[idx++];
+        response.Time.day = rv_buf[idx++];
+        response.Time.hour = rv_buf[idx++];
+        response.Time.min = rv_buf[idx++];
+        response.Time.sec = rv_buf[idx++];
+        response.Time.msec = (rv_buf[idx++] << 8) | (rv_buf[idx++]);
+        rs_datas_->push(response);
+    } else if (h == Packet::Response::MEASURING_SETTING_INFO.hex) {
+        int idx = 0;
+        bool enable_reserve = (rv_buf[0] == 1);
+        response.Type = Response::ResponseType::ResponseGetMeasureTime;
+        response.MeasureTime.start.year = rv_buf[idx++] + 2000;
+        response.MeasureTime.start.mon = rv_buf[idx++];
+        response.MeasureTime.start.day = rv_buf[idx++];
+        response.MeasureTime.start.hour = rv_buf[idx++];
+        response.MeasureTime.start.min = rv_buf[idx++];
+        response.MeasureTime.start.sec = rv_buf[idx++];
+        response.MeasureTime.end.year = rv_buf[idx++] + 2000;
+        response.MeasureTime.end.mon = rv_buf[idx++];
+        response.MeasureTime.end.day = rv_buf[idx++];
+        response.MeasureTime.end.hour = rv_buf[idx++];
+        response.MeasureTime.end.min = rv_buf[idx++];
+        response.MeasureTime.end.sec = rv_buf[idx++];
+        rs_datas_->push(response);
     } else if (h == Packet::Response::ACC_SETTING_INFO.hex) {
         int idx = 0;
-        uint8_t measure_freq = rv_buf[idx++];
-        uint8_t send_freq = rv_buf[idx++];
-        uint8_t save_freq = rv_buf[idx++];
+        response.Type = Response::ResponseType::ResponseGetAccAngSetting;
+        response.AccAng.measureFreq = rv_buf[idx++];
+        response.AccAng.sendFreq = rv_buf[idx++];
+        response.AccAng.saveFreq = rv_buf[idx++];
+        rs_datas_->push(response);
+    } else if (h == Packet::Response::GEO_SETTING_INFO.hex) {
+        int idx = 0;
     }
     /*/
     break;
@@ -238,30 +324,41 @@ case Packet::Event::ENDED.hex:
 }
 
 void SerialTSND151::TSND151::_loop() {
-    int available = 0;
-    bool check = false;
-
-    // Receive loop
-    while ((available = device_->getRecvSize()) != 0) {
-        uint8_t byte = device_->popRecvData();
-
-        switch (r_status_) {
-        case R_Status::R_W_HEAD:
-            r_status_ = _recv_wait(byte);
-            break;
-        case R_Status::R_W_CMD:
-            r_status_ = _recv_cmd(byte, rv_cmd_, rv_index_);
-            break;
-        case R_Status::R_W_PARAM:
-            r_status_ = _recv_param(byte, rv_cmd_, rv_buffer_, rv_index_);
-            break;
-        case R_Status::R_W_BCC: {
-            r_status_ =
-                _recv_bcc(byte, (const uint8_t *)rv_buffer_, rv_index_, check);
-            _parse(rv_cmd_, (const uint8_t *)rv_buffer_, rv_index_);
-        }
-        default:
-            break;
-        }
+    if (!thread_m_.try_lock()) {
+        return;
     }
+
+    while (willStop_ == false) {
+        int available = 0;
+        bool check = false;
+
+        // Receive loop
+        while ((available = device_->getRecvSize()) != 0) {
+            uint8_t byte = device_->popRecvData();
+
+            switch (r_status_) {
+            case R_Status::R_W_HEAD:
+                r_status_ = _recv_wait(byte);
+                break;
+            case R_Status::R_W_CMD:
+                r_status_ = _recv_cmd(byte, rv_cmd_, rv_index_);
+                break;
+            case R_Status::R_W_PARAM:
+                r_status_ = _recv_param(byte, rv_cmd_, rv_buffer_, rv_index_);
+                break;
+            case R_Status::R_W_BCC: {
+                r_status_ = _recv_bcc(byte, (const uint8_t *)rv_buffer_,
+                                      rv_index_, check);
+                _parse(rv_cmd_, (const uint8_t *)rv_buffer_, rv_index_, check);
+            }
+            default:
+                break;
+            }
+        }
+
+        // Send loop
+        device_->send();
+    } // while
+
+    thread_m_.unlock();
 }

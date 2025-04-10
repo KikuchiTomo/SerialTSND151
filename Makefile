@@ -9,8 +9,8 @@ SRCEXT    := cpp
 DEPEXT    := d
 OBJEXT    := o
 
-CXXFLAGS  := -std=c++14 -w -g
-INC       := -Isrc -Iinclude
+CXXFLAGS  := -std=c++14 -w -g 
+INC       := -Isrc -Iinclude -pthread
 
 sources      := $(shell find $(SRCDIR) -type f -name *.$(SRCEXT))
 objects      := $(patsubst $(SRCDIR)/%,$(BUILDDIR)/%,$(subst $(SRCEXT),$(OBJEXT),$(sources)))

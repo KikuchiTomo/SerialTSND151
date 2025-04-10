@@ -4,6 +4,7 @@
 #include "packet.hpp"
 
 namespace SerialTSND151 {
+
 typedef bool Level;
 typedef bool Edge;
 typedef enum { No, Pos, Neg } EdgeMode;
@@ -11,6 +12,7 @@ typedef enum { No, Pos, Neg } EdgeMode;
 static Level HIGH = true;
 static Level LOW = false;
 
+namespace Event {
 typedef enum {
     NoError = 0x00,
     AccOrAngVecSensorError = 0x80,
@@ -111,6 +113,7 @@ typedef struct {
 } AD16bit_t;
 
 typedef struct {
+    bool Validation;
     EventType Type;
     AccVec_t Acc;
     AngVec_t Ang;
@@ -126,7 +129,8 @@ typedef struct {
     AD16bit_t AD16;
 } Event_t;
 
-static const Event_t EventDefault = {
+static const Event_t Default = {
+    .Validation = false,
     .Type = NotifyInvaild,
     .Acc = {0},
     .Ang = {0},
@@ -148,8 +152,9 @@ static const Event_t EventDefault = {
     .Edge.time = 0,
     .Qua = {0},
     .AD16 = {0},
+};
 
+}; // namespace Event
 }; // namespace SerialTSND151
-} // namespace SerialTSND151
 
 #endif
